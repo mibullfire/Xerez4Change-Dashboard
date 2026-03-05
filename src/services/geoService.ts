@@ -32,6 +32,23 @@ const MOCK_DATA: Omit<GeoPoint, 'level'>[] = [
   { id: 'p016', lat: 36.6850, lon: -6.1261, vibration: 0.10, trainId: 'T-101', timestamp: '2026-03-04T08:15:00Z' },
   { id: 'p017', lat: 36.6892, lon: -6.1198, vibration: 0.30, trainId: 'T-101', timestamp: '2026-03-04T08:15:10Z' },
   { id: 'p018', lat: 36.6915, lon: -6.1170, vibration: 0.55, trainId: 'T-101', timestamp: '2026-03-04T08:15:15Z', anomalyType: 'vibración elevada', frequencyHz: 40.1 },
+
+// — Trayecto: Sevilla Santa Justa hacia Jerez (Hoy, 05 de Marzo) —
+  { id: 'p101', lat: 37.3915, lon: -5.9755, vibration: 0.11, trainId: 'T-201', timestamp: '2026-03-05T09:00:00Z' }, // Salida Santa Justa
+  { id: 'p102', lat: 37.3450, lon: -5.9580, vibration: 0.18, trainId: 'T-201', timestamp: '2026-03-05T09:05:00Z' }, // Zona Dos Hermanas
+  { id: 'p103', lat: 37.1842, lon: -5.7830, vibration: 0.48, trainId: 'T-201', timestamp: '2026-03-05T09:15:00Z', anomalyType: 'vibración elevada' }, // Cerca de Utrera
+  { id: 'p104', lat: 36.9850, lon: -5.9320, vibration: 0.76, trainId: 'T-201', timestamp: '2026-03-05T09:25:00Z', anomalyType: 'pico crítico', frequencyHz: 44.2 }, // Las Cabezas
+  { id: 'p105', lat: 36.9210, lon: -6.0780, vibration: 0.85, trainId: 'T-201', timestamp: '2026-03-05T09:35:00Z', anomalyType: 'pico crítico', frequencyHz: 48.5 }, // Zona Lebrija
+  { id: 'p106', lat: 36.8000, lon: -6.1150, vibration: 0.22, trainId: 'T-201', timestamp: '2026-03-05T09:45:00Z' }, // Entrada a la provincia de Cádiz
+  { id: 'p107', lat: 36.6852, lon: -6.1265, vibration: 0.09, trainId: 'T-201', timestamp: '2026-03-05T09:55:00Z' }, // Llegada Jerez de la Frontera
+
+  // — Segundo Tren en ruta (Hoy) —
+  { id: 'p108', lat: 37.1842, lon: -5.7830, vibration: 0.35, trainId: 'T-202', timestamp: '2026-03-05T10:15:00Z', anomalyType: 'vibración elevada' },
+
+  // — Datos de AYER (04 de Marzo) para comparación temporal en el mismo punto crítico —
+  { id: 'p109', lat: 36.9850, lon: -5.9320, vibration: 0.52, trainId: 'T-201', timestamp: '2026-03-04T09:25:00Z', anomalyType: 'vibración elevada', frequencyHz: 39.8 },
+  { id: 'p110', lat: 36.9210, lon: -6.0780, vibration: 0.61, trainId: 'T-201', timestamp: '2026-03-04T09:35:00Z', anomalyType: 'vibración elevada', frequencyHz: 41.2 }
+
 ];
 
 /** Enriquecer los datos crudos con el nivel calculado */
