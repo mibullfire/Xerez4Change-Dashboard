@@ -1,305 +1,238 @@
-# Xerez4Change-Dashboard
+# Xerez4Change — Dashboard
 
-Dashboard de monitorización de vibraciones en vía férrea para el proyecto Xerez4Change.  
-Visualiza en tiempo real coordenadas GPS con colores dinámicos según el nivel de vibración, filtros por fecha/tren/anomalía y un diseño tipo cabina de control en modo oscuro.
-
----
-
-## Tecnologías
-
-| Tecnología | Uso |
-|---|---|
-| React 19 + TypeScript | Framework UI con tipado estricto |
-| Vite 7 | Bundler ultrarrápido con HMR |
-| Tailwind CSS 3 | Estilos utility-first, modo oscuro |
-| Leaflet + react-leaflet | Mapa interactivo con capa CartoDB Dark Matter |
-| Zustand | Estado global ligero (store reactivo) |
+Dashboard de monitorización de vibraciones en vía férrea.  
+Visualiza en tiempo real los puntos GPS enviados por el ESP32, con código de colores por nivel de vibración, filtros por fecha/tren/anomalía y diseño en modo oscuro.
 
 ---
 
-## Estructura del Proyecto
+## Configuración y arranque
+
+### Requisitos previos
+
+- Node.js ≥ 18
+- El backend Docker arrancado (ver sección [Backend](#backend))
+
+### 1. Instalar dependencias
+
+```bash
+cd Xerez4Change-Dashboard
+npm install
+```
+
+### 2. Configurar la conexión a InfluxDB
+
+Edita el archivo **`.env`** en la raíz del proyecto. Los valores por defecto
+corresponden a la configuración estándar del `docker-compose` del backend:
+
+```env
+VITE_INFLUX_TOKEN=my-super-secret-auth-token
+VITE_INFLUX_ORG=train_org
+VITE_INFLUX_BUCKET=vibrations
+VITE_POLL_INTERVAL_MS=10000
+```
+
+> En desarrollo, las peticiones a InfluxDB van a través del proxy de Vite
+> (`/influx → http://localhost:8086`), por lo que no hace falta exponer la URL.  
+> Para producción, añade `VITE_INFLUX_URL=http://<ip-servidor>:8086`.
+
+### 3. Arrancar el servidor de desarrollo
+
+```bash
+npm run dev
+```
+
+El dashboard estará disponible en **http://localhost:5173**.
+
+Si InfluxDB no está arrancado, el dashboard carga automáticamente datos de
+demostración (mock) y muestra el indicador **"Simulado · Mock"** en la cabecera.
+En cuanto el backend esté activo y con datos, cambia a **"En vivo · InfluxDB"**.
+
+### 4. Compilar para producción
+
+```bash
+npm run build      # genera dist/
+npm run preview    # sirve el build en http://localhost:4173
+```
+
+---
+
+## Backend
+
+El backend vive en `X4C-Moscatel-main/codeina/train_digital_twin/backend/`.
+
+```bash
+cd X4C-Moscatel-main/codeina/train_digital_twin/backend
+docker-compose up -d
+```
+
+Levanta cuatro servicios:
+
+| Servicio | Puerto | Descripción |
+|---|---|---|
+| Mosquitto | `1883` | Broker MQTT. Recibe los mensajes del ESP32 |
+| InfluxDB 2.7 | `8086` | Base de datos de series temporales. Panel en http://localhost:8086 (`admin` / `adminpassword`) |
+| Telegraf | — | Suscribe el topic MQTT y escribe los campos en InfluxDB |
+| Grafana | `3000` | Dashboard alternativo en http://localhost:3000 (`admin` / `admin`) |
+
+Para que el ESP32 envíe datos a este backend, consulta `X4C-Moscatel-main/ESP32_CHANGES.md`.
+
+---
+
+## Cómo funciona
+
+### Flujo completo de datos
+
+```
+ESP32 (WiFi + MQTT)
+    │  topic: train/telemetry/vibrations
+    ▼
+Mosquitto :1883
+    │
+    ▼
+Telegraf  →  aplana JSON  →  InfluxDB :8086
+                                    │
+                                    │  Flux query (cada 10 s)
+                                    ▼
+                            geoService.ts
+                                    │  parseInfluxCSV()
+                                    │  accel_z → vibration_g
+                                    │  deriva anomalyType
+                                    ▼
+                            useGeoData.ts  →  dashboardStore.ts
+                                                    │
+                                    ┌───────────────┘
+                                    │  filteredPoints
+                                    ▼
+                            GeoMap.tsx  →  CircleMarker por cada punto
+```
+
+### Lógica interna capa a capa
+
+#### `src/services/geoService.ts` — Origen de datos
+
+Es el único punto de entrada de datos al dashboard. Ejecuta una consulta Flux
+sobre InfluxDB pidiendo las últimas 2 horas de mediciones, máximo 500 puntos:
+
+```flux
+from(bucket: "vibrations")
+  |> range(start: -2h)
+  |> filter(fn: (r) => r._measurement == "mqtt_consumer")
+  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"], desc: false)
+  |> limit(n: 500)
+```
+
+La respuesta es un CSV anotado (formato nativo de InfluxDB v2). El parser
+interno lo convierte línea a línea en objetos `GeoPoint`:
+
+- `lat`, `lon` → coordenadas directas
+- `accel_z` (m/s²) → `vibration` en g: `|accel_z − 9.81| / 9.81`
+- `trainId` → identificador del tren
+- `_time` → timestamp ISO
+- `dominant_freq_hz` → campo opcional si el ESP32 lo calcula y envía
+
+Si InfluxDB no responde o devuelve datos vacíos, la función cae silenciosamente
+a los datos mock y el indicador de cabecera cambia de verde a ámbar.
+El módulo expone `getLastSource()` para que el hook sepa qué fuente se usó.
+
+#### `src/utils/vibration.ts` — Clasificación y colores
+
+Toda la lógica de semáforo está centralizada aquí. Los umbrales son:
+
+| Vibración | Nivel | Color | Radio del marcador |
+|---|---|---|---|
+| < 0.3 g | `ok` | Verde `#10b981` | 6 px |
+| 0.3 – 0.7 g | `warning` | Ámbar `#f59e0b` | 9 px |
+| ≥ 0.7 g | `critical` | Rojo `#ef4444` | 12 px |
+
+Para ajustar cuándo se considera crítico un punto, edita las constantes
+`THRESHOLDS.warning` y `THRESHOLDS.critical` en este archivo.  
+El campo `level` del tipo `GeoPoint` siempre se calcula aquí; los datos
+de entrada no necesitan incluirlo.
+
+#### `src/hooks/useGeoData.ts` — Ciclo de refresco
+
+Al montarse, lanza la primera carga (con spinner) y arranca un `setInterval`
+que refresca los datos cada `VITE_POLL_INTERVAL_MS` milisegundos (10 s por defecto).
+Los refrescos periódicos son silenciosos: el mapa se actualiza sin parpadear.
+Al desmontar el componente, cancela el intervalo y marca las peticiones en vuelo
+como descartadas para evitar actualizar estado de componentes ya desmontados.
+
+#### `src/store/dashboardStore.ts` — Estado global (Zustand)
+
+Almacén central con dos listas de puntos:
+
+- `points` — todos los puntos recibidos, sin filtrar
+- `filteredPoints` — resultado de aplicar los filtros activos sobre `points`
+
+Cada vez que llegan nuevos datos (`setPoints`) o cambia un filtro (`setFilters`),
+`applyFilters()` recalcula `filteredPoints` en el mismo tick. El mapa solo
+consume `filteredPoints`, por lo que nunca ve datos que no pasen los filtros.
+
+Los tres filtros disponibles se evalúan en AND:
+
+1. **Rango de fechas** — compara el `timestamp` ISO del punto con `[inicio, fin]`
+2. **ID de tren** — coincidencia exacta de `trainId`
+3. **Tipo de anomalía** — coincidencia exacta de `anomalyType`
+
+#### `src/components/GeoMap.tsx` — Visualización
+
+Componente puramente visual. Recibe `data: GeoPoint[]` y no sabe de dónde vienen.
+Renderiza sobre un `MapContainer` de Leaflet centrado en la zona Jerez–Cádiz
+(`[36.62, −6.20]`, zoom 12) con capa CartoDB Dark Matter.
+
+Por cada punto crea un `CircleMarker` cuyo color y radio vienen de
+`getVibrationColor()` y `getMarkerRadius()` de `vibration.ts`. Los puntos
+críticos tienen borde de 2 px en lugar de 1 px para destacar más.
+
+Cada marcador tiene:
+- **Tooltip** (hover): tren + vibración, aparece rápido
+- **Popup** (click): detalle completo — nivel, tren, vibración, frecuencia dominante (si existe), tipo de anomalía (si existe) y timestamp formateado
+
+Dos overlays posicionados con `z-index: 1000` sobre el mapa:
+- **`Legend`** — abajo a la izquierda, muestra los tres colores con sus rangos
+- **`Stats`** — arriba a la derecha, muestra total de puntos, avisos y críticos
+
+#### `src/components/FilterBar.tsx` — Filtros
+
+Los desplegables de tren y anomalía se alimentan de `fetchTrainIds()` y
+`fetchAnomalyTypes()`, que derivan los valores únicos de los propios datos.
+Cualquier filtro que se active llama a `setFilters()` del store, lo que
+recalcula `filteredPoints` al instante sin ninguna petición de red adicional.
+
+---
+
+## Estructura de archivos
 
 ```
 src/
 ├── components/
-│   ├── GeoMap.tsx          # Mapa Leaflet con marcadores de colores, leyenda y stats
-│   └── FilterBar.tsx       # Barra de filtros (fecha, tren, anomalía)
+│   ├── GeoMap.tsx          # Mapa Leaflet: marcadores, leyenda, stats
+│   └── FilterBar.tsx       # Filtros de fecha, tren y anomalía
 ├── hooks/
-│   └── useGeoData.ts       # Hook que carga los puntos GPS y alimenta el store
+│   └── useGeoData.ts       # Polling + carga inicial + fuente activa
 ├── services/
-│   └── geoService.ts       # Servicio de datos (mock ahora, API real después)
+│   └── geoService.ts       # Flux query → parse CSV → GeoPoint[] (fallback mock)
 ├── store/
-│   └── dashboardStore.ts   # Estado global con Zustand (puntos, filtros, loading)
+│   └── dashboardStore.ts   # Zustand: puntos, filtros, loading, error
 ├── utils/
-│   └── vibration.ts        # Clasificación de vibración, colores, formateo
-├── types.ts                # Tipos TypeScript: GeoPoint, DashboardFilters
-├── App.tsx                 # Layout principal del dashboard
+│   └── vibration.ts        # Umbrales, colores, radios, formateo
+├── types.ts                # GeoPoint, DashboardFilters, VibrationLevel
+├── App.tsx                 # Layout: cabecera + badge de estado + mapa
 ├── main.tsx                # Punto de entrada de React
 └── index.css               # Tailwind + estilos oscuros para popups de Leaflet
 ```
 
 ---
 
-## Instalación y arranque
+## Referencia rápida
 
-```bash
-# Instalar dependencias
-npm install
-
-# Arrancar servidor de desarrollo (http://localhost:5173)
-npm run dev
-
-# Compilar para producción
-npm run build
-```
-
----
-
-## Flujo completo de datos
-
-El recorrido de un punto GPS desde su origen hasta que se pinta en el mapa es:
-
-```
-geoService.ts  →  useGeoData.ts  →  dashboardStore.ts  →  App.tsx  →  GeoMap.tsx
-  (origen)         (cargador)        (almacén global)      (orquesta)   (pinta)
-```
-
-1. **`geoService.ts`** — Proporciona los datos (mock o API real).
-2. **`useGeoData.ts`** — Al montar el componente, llama al servicio y guarda los puntos en el store.
-3. **`dashboardStore.ts`** — Almacena todos los puntos y aplica los filtros activos automáticamente.
-4. **`App.tsx`** — Lee `filteredPoints` del store y los pasa al mapa.
-5. **`GeoMap.tsx`** — Pinta cada punto como un `CircleMarker` con color y radio según vibración.
-
----
-
-## Descripción de cada archivo
-
-### `src/types.ts` — Tipos del dominio
-
-Define la forma exacta de los datos que maneja toda la app:
-
-**`GeoPoint`** — cada punto que aparece en el mapa:
-
-| Campo | Tipo | Descripción |
-|---|---|---|
-| `id` | `string` | Identificador único (`"p001"`, `"p002"`, ...) |
-| `lat` / `lon` | `number` | Coordenadas GPS (sistema WGS-84) |
-| `vibration` | `number` | Valor de vibración en **g** (aceleración gravitacional) |
-| `level` | `'ok' \| 'warning' \| 'critical'` | Nivel de severidad. **Se calcula automáticamente** a partir de `vibration` |
-| `trainId` | `string` | Identificador del tren que generó la medición |
-| `timestamp` | `string` | Fecha/hora en formato ISO (`"2026-03-05T08:15:00Z"`) |
-| `frequencyHz` | `number?` | *(Opcional)* Frecuencia dominante del análisis espectral |
-| `anomalyType` | `string?` | *(Opcional)* Tipo de anomalía detectada |
-
-**`DashboardFilters`** — filtros del usuario:
-
-- `dateRange`: par de fechas `[inicio, fin]` o `null`
-- `trainId`: un tren concreto o `null` (todos)
-- `anomalyType`: un tipo de anomalía concreto o `null` (todas)
-
----
-
-### `src/services/geoService.ts` — Servicio de coordenadas GPS
-
-**Es EL ÚNICO archivo que hay que tocar cuando lleguen datos reales del arquitecto.**
-
-Contiene un array `MOCK_DATA` con **18 puntos simulados** en 3 tramos:
-
-- **Jerez de la Frontera** (T-101): 5 puntos, de normal a crítico
-- **El Puerto de Santa María** (T-102): 5 puntos, con avisos
-- **Cádiz** (T-103): 5 puntos, con un pico crítico
-- **Datos de ayer** (T-101 histórico): 3 puntos para comparación temporal
-
-Funciones exportadas:
-
-| Función | Qué hace |
+| Necesidad | Dónde |
 |---|---|
-| `fetchGeoPoints()` | Devuelve **todos** los puntos GPS (con 300ms de latencia simulada). **Esta es la que se sustituye** cuando haya API |
-| `fetchTrainIds()` | Devuelve lista de IDs de tren únicos (alimenta el desplegable) |
-| `fetchAnomalyTypes()` | Devuelve lista de anomalías únicas (alimenta el otro desplegable) |
-
-La función `enrichPoints()` toma los datos crudos (sin `level`) y **calcula automáticamente** el nivel llamando a `classifyVibration()`. El arquitecto **no necesita enviar el campo `level`** — solo `lat`, `lon`, `vibration`, `trainId` y `timestamp`.
-
-**Cómo cambiar a datos reales:**
-
-```ts
-// ANTES (mock):
-export async function fetchGeoPoints(): Promise<GeoPoint[]> {
-  await new Promise((r) => setTimeout(r, 300));
-  return enrichPoints(MOCK_DATA);
-}
-
-// DESPUÉS (API real):
-export async function fetchGeoPoints(): Promise<GeoPoint[]> {
-  const res = await fetch('https://tu-api.com/api/geopoints');
-  const raw = await res.json();
-  return enrichPoints(raw);
-}
-```
-
----
-
-### `src/utils/vibration.ts` — Utilidades de vibración
-
-Centraliza **toda la lógica de semáforo**. Si queréis cambiar cuándo un punto es "crítico" o "aviso", **solo se toca aquí**.
-
-**Umbrales actuales:**
-
-| Rango de vibración | Nivel | Color | Radio en mapa |
-|---|---|---|---|
-| < 0.3 g | `ok` | Verde `#10b981` | 6px (pequeño) |
-| 0.3 – 0.7 g | `warning` | Ámbar `#f59e0b` | 9px (mediano) |
-| ≥ 0.7 g | `critical` | Rojo `#ef4444` | 12px (grande) |
-
-Para ajustar umbrales, editar las constantes:
-
-```ts
-const THRESHOLDS = {
-  warning: 0.3,   // ← cambiar si el arquitecto define otro umbral
-  critical: 0.7,  // ← cambiar aquí
-};
-```
-
-Helpers de formateo:
-
-- `formatVibration(0.45)` → `"0.450 g"`
-- `formatTimestamp("2026-03-05T08:15:00Z")` → `"05/03/2026, 08:15:00"`
-
----
-
-### `src/store/dashboardStore.ts` — Estado global (Zustand)
-
-Almacén central que todos los componentes comparten.
-
-**Estado:**
-
-| Propiedad | Descripción |
-|---|---|
-| `points` | **TODOS** los puntos GPS (sin filtrar) |
-| `filteredPoints` | Puntos **después de aplicar filtros** (lo que se pinta en el mapa) |
-| `filters` | Filtros activos del usuario |
-| `loading` | `true` mientras se cargan datos |
-| `error` | Mensaje de error si falla la carga |
-
-**Acciones:**
-
-| Acción | Qué hace |
-|---|---|
-| `setPoints(data)` | Guarda los puntos y aplica automáticamente los filtros activos |
-| `setFilters({ trainId: 'T-101' })` | Actualiza un filtro y recalcula `filteredPoints` al instante |
-| `resetFilters()` | Limpia todos los filtros → muestra todos los puntos |
-| `setLoading(true/false)` | Activa/desactiva el spinner |
-| `setError("mensaje")` | Muestra error en pantalla |
-
-Cada vez que se cambia un filtro, `applyFilters()` recorre todos los puntos y devuelve solo los que pasan las 3 condiciones (fecha, tren, anomalía). El mapa se actualiza **automáticamente**.
-
----
-
-### `src/hooks/useGeoData.ts` — Hook de carga de datos
-
-Puente entre el servicio y los componentes React:
-
-1. Cuando el componente se monta → pone `loading: true`
-2. Llama a `fetchGeoPoints()` del servicio
-3. Si va bien → guarda los puntos en el store con `setPoints(data)`
-4. Si falla → guarda el error con `setError(mensaje)`
-5. Devuelve `{ points, loading, error }` para el componente
-
-La variable `cancelled` es un patrón de seguridad: si el componente se desmonta antes de que termine la carga, evita actualizar un componente que ya no existe.
-
-Para datos en tiempo real, este hook se puede convertir en un listener de WebSocket:
-
-```ts
-useEffect(() => {
-  const ws = new WebSocket('wss://tu-api.com/live');
-  ws.onmessage = (e) => setPoints(JSON.parse(e.data));
-  return () => ws.close();
-}, []);
-```
-
----
-
-### `src/components/GeoMap.tsx` — Mapa interactivo
-
-Componente **puramente visual**. Recibe `data: GeoPoint[]` y pinta:
-
-- **`MapContainer`**: contenedor Leaflet centrado en Jerez–Cádiz (`[36.62, -6.20]`, zoom 12)
-- **`TileLayer`**: capa CartoDB Dark Matter (mapa oscuro)
-- **Por cada punto → `CircleMarker`**:
-  - Color: verde/ámbar/rojo según vibración
-  - Radio: 6/9/12px según nivel
-  - Borde más grueso si es crítico
-  - **Hover (Tooltip)**: tren + vibración rápido
-  - **Click (Popup)**: detalle completo (nivel, tren, vibración, frecuencia, anomalía, fecha)
-- **`Legend`**: leyenda flotante abajo-izquierda con los 3 colores y rangos
-- **`Stats`**: contador flotante arriba-derecha (total puntos, avisos, críticos)
-
----
-
-### `src/components/FilterBar.tsx` — Barra de filtros
-
-- **2 inputs de fecha** (inicio → fin): filtran por `timestamp`
-- **Desplegable de trenes**: alimentado automáticamente con los `trainId` únicos
-- **Desplegable de anomalías**: alimentado con los `anomalyType` únicos
-- **Botón "Limpiar"**: resetea todos los filtros
-
-Cada cambio llama a `setFilters()` → recalcula `filteredPoints` → el mapa se repinta con los puntos filtrados.
-
----
-
-### `src/App.tsx` — Layout principal
-
-1. Llama a `useGeoData()` → obtiene `points`, `loading`, `error`
-2. Muestra cabecera (nombre del proyecto + fecha)
-3. Muestra `FilterBar` (barra de filtros)
-4. Si `loading` → spinner de carga
-5. Si `error` → mensaje de error en rojo
-6. Si todo ok → pinta `GeoMap` con los puntos filtrados
-
----
-
-## Pruebas a realizar
-
-### Pruebas visuales (abrir http://localhost:5173)
-
-| # | Prueba | Qué verificar |
-|---|---|---|
-| 1 | Carga inicial | Se ven ~18 puntos de colores en la zona de Jerez–Cádiz |
-| 2 | Colores correctos | Verdes (vibración baja), ámbar (media), rojos (alta) |
-| 3 | Hover sobre un punto | Aparece tooltip con tren + vibración |
-| 4 | Click en un punto | Popup con todos los detalles |
-| 5 | Leyenda | Aparece abajo-izquierda con 3 colores y rangos |
-| 6 | Contadores | Arriba-derecha muestra totales correctos |
-| 7 | Filtro por tren | Seleccionar "T-101" → solo se ven puntos de ese tren |
-| 8 | Filtro por anomalía | Seleccionar "pico crítico" → solo puntos con esa anomalía |
-| 9 | Filtro por fecha | Poner solo el 04/03/2026 → solo 3 puntos (los de ayer) |
-| 10 | Limpiar filtros | Click en "Limpiar" → vuelven todos los puntos |
-| 11 | Zoom y pan | El mapa se puede hacer zoom y arrastrar |
-| 12 | Modo oscuro | Todo es oscuro: mapa, fondo, filtros, popups |
-
-### Pruebas de datos (modificar `src/services/geoService.ts`)
-
-| # | Prueba | Cómo |
-|---|---|---|
-| 13 | Añadir un punto | Añadir un objeto más a `MOCK_DATA` → aparece en el mapa |
-| 14 | Cambiar vibración | Cambiar `vibration: 0.12` a `0.90` → el punto pasa a rojo y grande |
-| 15 | Dato vacío | Dejar `MOCK_DATA = []` → el mapa sale vacío, contadores en 0 |
-
-### Prueba de umbrales (modificar `src/utils/vibration.ts`)
-
-| # | Prueba | Cómo |
-|---|---|---|
-| 16 | Cambiar umbral | Cambiar `warning: 0.3` a `0.5` → menos puntos ámbar, más verdes |
-
----
-
-## Referencia rápida: ¿dónde toco qué?
-
-| Necesidad | Archivo a editar |
-|---|---|
-| Cambiar datos de prueba / conectar API real | `src/services/geoService.ts` |
-| Cambiar umbrales verde/ámbar/rojo | `src/utils/vibration.ts` |
-| Cambiar centro/zoom del mapa | `src/components/GeoMap.tsx` (constantes `DEFAULT_CENTER` y `DEFAULT_ZOOM`) |
-| Cambiar aspecto visual del popup/tooltip | `src/components/GeoMap.tsx` |
+| Cambiar token / org / bucket de InfluxDB | `.env` |
+| Cambiar intervalo de refresco | `.env` → `VITE_POLL_INTERVAL_MS` |
+| Cambiar IP de InfluxDB en producción | `.env` → `VITE_INFLUX_URL` |
+| Ajustar umbrales de vibración | `src/utils/vibration.ts` → `THRESHOLDS` |
+| Cambiar ventana de tiempo de la query | `src/services/geoService.ts` → `range(start: -2h)` |
+| Cambiar centro o zoom inicial del mapa | `src/components/GeoMap.tsx` → `DEFAULT_CENTER`, `DEFAULT_ZOOM` |
 | Añadir un filtro nuevo | `src/types.ts` + `src/store/dashboardStore.ts` + `src/components/FilterBar.tsx` |
-| Cambiar colores del tema | `tailwind.config.js` |

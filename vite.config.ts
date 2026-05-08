@@ -9,4 +9,14 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  server: {
+    // Proxy /influx → InfluxDB local para evitar CORS en desarrollo
+    proxy: {
+      '/influx': {
+        target: 'http://localhost:8086',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/influx/, ''),
+      },
+    },
+  },
 })

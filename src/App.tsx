@@ -4,7 +4,7 @@ import { FilterBar } from './components/FilterBar';
 import { useGeoData } from './hooks/useGeoData';
 
 export default function App() {
-  const { points, loading, error } = useGeoData();
+  const { points, loading, error, dataSource } = useGeoData();
 
   return (
     <div className="flex h-screen flex-col bg-surface-900 text-gray-100 font-sans">
@@ -16,8 +16,30 @@ export default function App() {
         <span className="rounded bg-blue-500/20 px-2 py-0.5 font-mono text-xs text-blue-300">
           Dashboard v0.1
         </span>
+
+        {/* Indicador de fuente de datos */}
+        <span
+          className={`flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-xs ${
+            dataSource === 'live'
+              ? 'bg-green-500/20 text-green-300'
+              : 'bg-amber-500/20 text-amber-300'
+          }`}
+        >
+          <span
+            className={`inline-block h-1.5 w-1.5 rounded-full ${
+              dataSource === 'live' ? 'animate-pulse bg-green-400' : 'bg-amber-400'
+            }`}
+          />
+          {dataSource === 'live' ? 'En vivo · InfluxDB' : 'Simulado · Mock'}
+        </span>
+
         <span className="ml-auto font-mono text-xs text-gray-500">
-          {new Date().toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+          {new Date().toLocaleDateString('es-ES', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+          })}
         </span>
       </header>
 
