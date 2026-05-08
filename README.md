@@ -58,10 +58,26 @@ npm run preview    # sirve el build en http://localhost:4173
 
 ## Backend
 
-El backend vive en `X4C-Moscatel-main/codeina/train_digital_twin/backend/`.
+El backend vive en `X4C-Moscatel/codeina/train_digital_twin/backend/`.
+
+### 1. Averiguar la IP de tu máquina
+
+El ESP32 necesita saber a qué IP conectarse. Antes de flashear, obtén la IP
+del host donde vas a correr Docker y anótala:
 
 ```bash
-cd X4C-Moscatel-main/codeina/train_digital_twin/backend
+# Windows
+ipconfig
+# Mac / Linux
+ifconfig   # o: ip route get 1 | awk '{print $7}'
+```
+
+> El ESP32 y el host deben estar en la **misma red WiFi**.
+
+### 2. Arrancar el backend Docker
+
+```bash
+cd X4C-Moscatel/codeina/train_digital_twin/backend
 docker-compose up -d
 ```
 
@@ -74,7 +90,33 @@ Levanta cuatro servicios:
 | Telegraf | — | Suscribe el topic MQTT y escribe los campos en InfluxDB |
 | Grafana | `3000` | Dashboard alternativo en http://localhost:3000 (`admin` / `admin`) |
 
-Para que el ESP32 envíe datos a este backend, consulta `X4C-Moscatel-main/ESP32_CHANGES.md`.
+Para verificar que los contenedores están corriendo:
+
+```bash
+docker-compose ps
+```
+
+### 3. Configurar y flashear el ESP32
+
+Antes de flashear, edita **`X4C-Moscatel/codeina/train_digital_twin/main/network_task.cpp`**
+y rellena las tres macros al inicio del archivo:
+
+```c
+#define WIFI_SSID       "NOMBRE_DE_TU_RED"        // ← tu red WiFi
+#define WIFI_PASS       "CONTRASEÑA_DE_TU_RED"    // ← tu contraseña
+#define MQTT_BROKER_URI "mqtt://192.168.X.X:1883" // ← IP del host del paso 1
+#define TRAIN_ID        "T-101"                   // ← ID único por unidad
+```
+
+Luego compila y flashea con ESP-IDF:
+
+```bash
+cd X4C-Moscatel/codeina/train_digital_twin
+idf.py build flash monitor
+```
+
+Una vez el ESP32 esté corriendo y con fix GPS, los puntos empezarán a
+aparecer en el mapa con el indicador **"En vivo · InfluxDB"** en la cabecera.
 
 ---
 
